@@ -1,0 +1,131 @@
+name: build-xbox-poc
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: d3d11-msvc, target: x86_64-pc-windows-msvc,  args: "",                       nightly: false }
+          - { id: wgpu-msvc,  target: x86_64-pc-windows-msvc,  args: "--features wgpu-render", nightly: false }
+          - { id: d3d11-uwp,  target: x86_64-uwp-windows-msvc, args: "",                       nightly: true }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust nightly (só para o alvo UWP)
+        if: matrix.nightly
+        shell: pwsh
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          if ("${{ matrix.nightly }}" -eq "true") {
+            cargo +nightly build --release --target ${{ matrix.target }} ${{ matrix.args }} -Z build-std=std,panic_abort 2>&1 | Tee-Object -FilePath build.log
+          } else {
+            $env:RUSTFLAGS = "-C target-feature=+crt-static"
+            cargo build --release --target ${{ matrix.target }} ${{ matrix.args }} 2>&1 | Tee-Object -FilePath build.log
+          }
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            "### Build falhou: ${{ matrix.id }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            Get-Content build.log -Tail 60 | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            exit $code
+          }
+
+      - name: Empacotar e assinar (MSIX)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $id = "${{ matrix.id }}"
+          New-Item -ItemType Directory -Force pkg\Assets, out | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\cinnabar_poc.exe" pkg\cinnabar_poc.exe
+
+          # logos gerados na hora (círculo vermelho num fundo escuro)
+          Add-Type -AssemblyName System.Drawing
+          function Png($w, $h, $name) {
+            $b = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($b)
+            $g.Clear([System.Drawing.Color]::FromArgb(27, 27, 31))
+            $br = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(178, 34, 34))
+            $d = [int]([Math]::Min($w, $h) * 0.5)
+            $g.FillEllipse($br, [int](($w - $d) / 2), [int](($h - $d) / 2), $d, $d)
+            $b.Save((Join-Path (Get-Location) "pkg\Assets\$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $b.Dispose()
+          }
+          Png 50 50 StoreLogo
+          Png 44 44 Square44x44Logo
+          Png 150 150 Square150x150Logo
+          Png 310 150 Wide310x150Logo
+          Png 620 300 SplashScreen
+
+          $dep = ""
+          if ($id -like "*uwp") {
+            $dep = '<PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.0.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />'
+            $vc = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs" -Recurse -Filter "Microsoft.VCLibs.x64.14.00.appx" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($vc) { Copy-Item $vc.FullName out\ }
+          }
+
+          $name = "CinnabarPoc." + ($id -replace '[^A-Za-z0-9]', '')
+          $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" IgnorableNamespaces="uap">
+            <Identity Name="$name" Publisher="CN=CinnabarDev" Version="0.0.1.0" ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>Cinnabar PoC $id</DisplayName>
+              <PublisherDisplayName>Cinnabar PoC</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
+              $dep
+            </Dependencies>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Applications>
+              <Application Id="App" Executable="cinnabar_poc.exe" EntryPoint="CinnabarPoc.App">
+                <uap:VisualElements DisplayName="Cinnabar PoC $id" Description="Teste de render UWP no Xbox" BackgroundColor="#1b1b1f" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+                  <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+                  <uap:SplashScreen Image="Assets\SplashScreen.png" />
+                </uap:VisualElements>
+              </Application>
+            </Applications>
+            <Capabilities>
+              <Capability Name="internetClient" />
+            </Capabilities>
+          </Package>
+          "@
+          Set-Content pkg\AppxManifest.xml $manifest -Encoding UTF8
+
+          $mk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter makeappx.exe | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          $signtool = Join-Path $mk.DirectoryName "signtool.exe"
+          $msix = "out\CinnabarPoc_$id.msix"
+          & $mk.FullName pack /d pkg /p $msix /o
+          if ($LASTEXITCODE) { throw "makeappx falhou" }
+
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=CinnabarDev" -KeyUsage DigitalSignature -FriendlyName "Cinnabar Dev" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $sec = ConvertTo-SecureString "dev" -AsPlainText -Force
+          Export-PfxCertificate -Cert $cert -FilePath poc.pfx -Password $sec | Out-Null
+          Export-Certificate -Cert $cert -FilePath out\cinnabar-dev.cer | Out-Null
+          & $signtool sign /fd SHA256 /f poc.pfx /p dev $msix
+          if ($LASTEXITCODE) { throw "signtool falhou" }
+
+      - name: Guardar resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-${{ matrix.id }}
+          path: |
+            out/*.msix
+            out/*.cer
+            out/*.appx
+            build.log
+          if-no-files-found: ignore
