@@ -1,0 +1,32 @@
+[package]
+name = "cinnabar_poc"
+version = "0.0.1"
+edition = "2021"
+
+[features]
+# build padrão = D3D11 puro (tela verde); com esta feature = wgpu (tela azul)
+wgpu-render = ["dep:wgpu", "dep:raw-window-handle", "dep:pollster"]
+
+[dependencies]
+windows-core = "0.61"
+raw-window-handle = { version = "0.6", optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "24", default-features = false, features = ["dx12"], optional = true }
+
+[dependencies.windows]
+version = "0.61"
+features = [
+  "ApplicationModel_Core",
+  "Foundation",
+  "Storage",
+  "Storage_Search",
+  "UI_Core",
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+]
+
+[profile.release]
+opt-level = 2
