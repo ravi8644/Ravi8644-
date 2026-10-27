@@ -25,6 +25,7 @@ use windows::{
     Foundation::TypedEventHandler,
     Storage::ApplicationData,
     UI::Core::{CoreProcessEventsOption, CoreWindow, CoreWindowEventArgs},
+    Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
 };
 
 static LOG_PATH: OnceLock<String> = OnceLock::new();
@@ -123,11 +124,17 @@ fn run() -> Result<()> {
 
 fn main() {
     std::panic::set_hook(Box::new(|info| log(&format!("PANIC: {info}"))));
+    if let Err(e) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+        log(&format!("RoInitialize(MTA) falhou: {e}"));
+        return;
+    }
+    log("WinRT: MTA inicializado");
     log("main: inicio");
     let source: IFrameworkViewSource = PocSource.into();
     if let Err(e) = CoreApplication::Run(&source) {
         log(&format!("CoreApplication::Run falhou: {e}"));
     }
+    unsafe { RoUninitialize() };
 }
 
 // ---------------------------------------------------------------- D3D11 (verde)
